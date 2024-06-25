@@ -3,10 +3,8 @@ __pycache__/
 data/
 debug/
 output/
-*.sh
 *output.txt
 cal*
 eval/
 output-txt/
-bash/
 generation_baseline/
