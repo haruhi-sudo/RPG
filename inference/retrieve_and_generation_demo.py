@@ -25,6 +25,8 @@ def generation_with_retriever_demo(query, model, extractor, tokenizer, spacy_tok
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name_or_path', type=str, required=True)
+    parser.add_argument('--extract_model_path', type=str, default="path")
+    parser.add_argument('--extract_tokenizer', type=str, default="path")
     parser.add_argument('--retriever_model', type=str, required=True)
     parser.add_argument('--passages', type=str, required=True)
     parser.add_argument('--passages_embeddings', type=str, required=True)
