@@ -1,10 +1,7 @@
 .vscode
 __pycache__/
-data/
 debug/
 output/
-*output.txt
-cal*
-eval/
-output-txt/
-generation_baseline/
+local*
+train_data/
+extractor/

@@ -1,7 +1,4 @@
 import os
-import re
-import json
-import shutil
 import argparse
 import logging
 import math
@@ -16,12 +13,10 @@ from accelerate.utils import set_seed
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from generation.debug_generation import generate_text_iter
 
 from dataset_utils import (
     encode_with_prompt_completion_format, 
     MyDataCollatorForSeq2Seq,
-    PROMPT_DICT
 )
 
 import transformers
@@ -29,8 +24,6 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
-    LlamaTokenizer,
-    LlamaTokenizerFast,
     SchedulerType,
     get_scheduler,
 )
@@ -44,22 +37,6 @@ from peft import (
 )
 
 logger = get_logger(__name__)
-
-def split_batch(batch):
-    batch_0 = {
-        'input_ids': batch['input_ids'][:1,:],
-        'attention_mask': batch['attention_mask'][:1,:],
-        'labels': batch['labels'][:1,:],
-        'task_ids': batch['task_ids'][:1]
-    }
-    batch_1 = {
-        'input_ids': batch['input_ids'][1:,:],
-        'attention_mask': batch['attention_mask'][1:,:],
-        'labels': batch['labels'][1:,:],
-        'task_ids': batch['task_ids'][1:]
-    }
-
-    return batch_0, batch_1
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a causal language modeling task")
@@ -363,7 +340,6 @@ def main():
         peft_config = MultitaskPromptTuningConfig(
             num_tasks=2,
             num_virtual_tokens=args.num_virtual_tokens,
-            # num_ranks=16,
             inference_mode=False, 
             task_type=TaskType.CAUSAL_LM,
             prompt_tuning_init=MultitaskPromptTuningInit.TEXT,
@@ -380,11 +356,6 @@ def main():
     for name, param in model.named_parameters():
         if 'embed_tokens' in name or "lm_head" in name:
             param.requires_grad=True
-    
-    # if args.modules_to_save is None:
-    #     for name, param in model.named_parameters():
-    #         if name.startswith("base_model.model.layers"):
-    #             param.requires_grad=False
     
     model.print_trainable_parameters()
 
@@ -523,137 +494,83 @@ def main():
     progress_bar.update(starting_epoch * num_update_steps_per_epoch)
     completed_steps = starting_epoch * num_update_steps_per_epoch
 
-    min_eval_loss = float('inf')  # 初始化最小 eval loss 为无穷大
-    second_min_eval_loss = float('inf')  # 初始化第二小 eval loss 为无穷大
-
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         total_loss = 0
         for step, batch in enumerate(train_dataloader):
             # We need to skip steps until we reach the resumed step
-            # 为了能在lingling上运行程序，节约显存的特殊操作
-            # for split_batch_0 in split_batch(batch):
-                if args.resume_from_checkpoint and epoch == starting_epoch:
-                    if resume_step is not None and completed_steps < resume_step:
-                        if step % args.gradient_accumulation_steps == 0:
-                            progress_bar.update(1)
-                            completed_steps += 1
-                        continue
+            if args.resume_from_checkpoint and epoch == starting_epoch:
+                if resume_step is not None and completed_steps < resume_step:
+                    if step % args.gradient_accumulation_steps == 0:
+                        progress_bar.update(1)
+                        completed_steps += 1
+                    continue
 
-                with accelerator.accumulate(model):
-                    outputs = model(**batch)
-                    # outputs = model(**split_batch_0)
-                    loss = outputs.loss
+            with accelerator.accumulate(model):
+                outputs = model(**batch)
+                loss = outputs.loss
+                
+                # We keep track of the loss at each logged step
+                total_loss += loss.detach().float()
+                accelerator.backward(loss)
+                optimizer.step()
+                optimizer.zero_grad()
+                lr_scheduler.step()       
+
+            # # Checks if the accelerator has performed an optimization step behind the scenes
+            if accelerator.sync_gradients:
+                progress_bar.update(1)
+                completed_steps += 1
+
+                if args.eval_steps and completed_steps % args.eval_steps == 0:
+                    model.eval()
                     
-                    # We keep track of the loss at each logged step
-                    total_loss += loss.detach().float()
-                    accelerator.backward(loss)
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    lr_scheduler.step()       
-
-                # # Checks if the accelerator has performed an optimization step behind the scenes
-                if accelerator.sync_gradients:
-                    progress_bar.update(1)
-                    completed_steps += 1
-
-                    if args.eval_steps and completed_steps % args.eval_steps == 0:
-                        model.eval()
-                        # Debug
-                        try:
-                            with open('data/val_asqa.jsonl', 'r', encoding='utf-8') as f:
-                                lines = f.readlines()
-                            # random select the first 1 examples
-                            example = json.loads(lines[295])
-                            content = re.findall('<fparagraph>(.*?)</fparagraph>', example["output"], re.DOTALL)
-
-                            prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
-                            source_text = prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
-                            debug_text = generate_text_iter(model, tokenizer, source_text, content)
-                            logger.info(f"  Step: {completed_steps}, Debug text: {debug_text}")
-
-                            eval_batch = encode_with_prompt_completion_format(example, tokenizer, 1024, context_markups=context_markups)
-                            logger.info(f"  ID: {example['id']}")
-                            for key in eval_batch:
-                                if isinstance(eval_batch[key], list):
-                                    eval_batch[key] = torch.stack(eval_batch[key])
-                                eval_batch[key] = eval_batch[key].cuda()
-
-                            eval_outputs = model(**eval_batch)
-                            logger.info(f"  Step: {completed_steps}, Debug Loss: {eval_outputs.loss.item()}")
-                            
-                        except Exception as e:
-                            pass
-
-                        total_eval_loss = 0  # 初始化总 eval loss 为 0
-                        for name, eval_dataloader in eval_dataloaders.items():
-                            eval_loss = 0
-                            for eval_step, eval_batch in enumerate(eval_dataloader):
-                                with torch.no_grad():
-                                    # eval_batch = split_batch(eval_batch)[-1]
-                                    eval_outputs = model(**eval_batch)
-                                    eval_loss += eval_outputs.loss.detach().float()
-                            eval_loss /= eval_step + 1
-                            total_eval_loss += eval_loss  # 累加每个 eval_dataloader 的 eval loss
-                            logger.info(f"  Step: {completed_steps}, Eval Loss for {name}: {eval_loss}")
+                    total_eval_loss = 0  # 初始化总 eval loss 为 0
+                    for name, eval_dataloader in eval_dataloaders.items():
+                        eval_loss = 0
+                        for eval_step, eval_batch in enumerate(eval_dataloader):
+                            with torch.no_grad():
+                                eval_outputs = model(**eval_batch)
+                                eval_loss += eval_outputs.loss.detach().float()
                         
-                        logger.info(f"  Step: {completed_steps}, Eval Loss: {total_eval_loss}")
+                        eval_loss /= (eval_step + 1)
+                        total_eval_loss += eval_loss  # 累加每个 eval_dataloader 的 eval loss
+                        logger.info(f"  Step: {completed_steps}, Eval Loss for {name}: {eval_loss}")
+                    
+                    logger.info(f"  Step: {completed_steps}, Eval Loss: {total_eval_loss}")
 
+                    if args.output_dir is not None:
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            tokenizer.save_pretrained(f"{args.output_dir}current")
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        state_dict = accelerator.get_state_dict(model)
+                        if accelerator.is_main_process:
+                            unwrapped_model.save_pretrained(f"{args.output_dir}current", state_dict=state_dict, save_embedding_layers=True)
+
+                    model.train()
+
+                if args.logging_steps and completed_steps % args.logging_steps == 0:
+                    avg_loss = accelerator.gather(total_loss).mean().item() / args.gradient_accumulation_steps / args.logging_steps
+                    logger.info(f"  Step: {completed_steps}, LR: {lr_scheduler.get_last_lr()[0]}, Loss: {avg_loss}")
+                    if args.with_tracking:
+                        accelerator.log(
+                            {
+                                "learning_rate": lr_scheduler.get_last_lr()[0],
+                                "train_loss": avg_loss,
+                            },
+                            step=completed_steps,
+                        )
+                    total_loss = 0
+                    
+                if isinstance(checkpointing_steps, int):
+                    if completed_steps % checkpointing_steps == 0:
+                        output_dir = f"step_{completed_steps}"
                         if args.output_dir is not None:
-                            accelerator.wait_for_everyone()
-                            if accelerator.is_main_process:
-                                tokenizer.save_pretrained(f"{args.output_dir}-current")
-                            unwrapped_model = accelerator.unwrap_model(model)
-                            state_dict = accelerator.get_state_dict(model)
-                            if accelerator.is_main_process:
-                                unwrapped_model.save_pretrained(f"{args.output_dir}-current", state_dict=state_dict, save_embedding_layers=True)
-
-                                # 如果当前的总 eval loss 比已保存的两个最低的总 eval loss 还要小，我们就更新这两个变量
-                                if total_eval_loss < min_eval_loss:
-                                    # 将旧的最佳模型保存为第二佳模型
-                                    if args.output_dir is not None and os.path.exists(f"{args.output_dir}-best-1"):
-                                        if os.path.exists(f"{args.output_dir}-best-2"):
-                                            shutil.rmtree(f"{args.output_dir}-best-2")
-                                        shutil.move(f"{args.output_dir}-best-1", f"{args.output_dir}-best-2")
-
-                                    min_eval_loss = total_eval_loss
-                                    # 将当前模型保存为最佳模型
-                                    if args.output_dir is not None and os.path.exists(f"{args.output_dir}-current"):
-                                        if os.path.exists(f"{args.output_dir}-best-1"):
-                                            shutil.rmtree(f"{args.output_dir}-best-1")
-                                        shutil.move(f"{args.output_dir}-current", f"{args.output_dir}-best-1")
-                                
-                                elif total_eval_loss < second_min_eval_loss:
-                                    second_min_eval_loss = total_eval_loss
-                                    # 将当前模型保存为第二佳模型
-                                    if args.output_dir is not None and os.path.exists(f"{args.output_dir}-current"):
-                                        if os.path.exists(f"{args.output_dir}-best-2"):
-                                            shutil.rmtree(f"{args.output_dir}-best-2")
-                                        shutil.move(f"{args.output_dir}-current", f"{args.output_dir}-best-2")
-
-                        model.train()
-
-                    if args.logging_steps and completed_steps % args.logging_steps == 0:
-                        avg_loss = accelerator.gather(total_loss).mean().item() / args.gradient_accumulation_steps / args.logging_steps
-                        logger.info(f"  Step: {completed_steps}, LR: {lr_scheduler.get_last_lr()[0]}, Loss: {avg_loss}")
-                        if args.with_tracking:
-                            accelerator.log(
-                                {
-                                    "learning_rate": lr_scheduler.get_last_lr()[0],
-                                    "train_loss": avg_loss,
-                                },
-                                step=completed_steps,
-                            )
-                        total_loss = 0
-                        
-                    if isinstance(checkpointing_steps, int):
-                        if completed_steps % checkpointing_steps == 0:
-                            output_dir = f"step_{completed_steps}"
-                            if args.output_dir is not None:
-                                output_dir = os.path.join(args.output_dir, output_dir)
-                            accelerator.save_state(output_dir)
-                    if completed_steps >= args.max_train_steps:
-                        break
+                            output_dir = os.path.join(args.output_dir, output_dir)
+                        accelerator.save_state(output_dir)
+                if completed_steps >= args.max_train_steps:
+                    break
 
         if args.checkpointing_steps == "epoch":
             output_dir = f"epoch_{epoch}"
@@ -663,7 +580,6 @@ def main():
 
     if args.with_tracking:
         accelerator.end_training()
-
 
 
 if __name__ == "__main__":
