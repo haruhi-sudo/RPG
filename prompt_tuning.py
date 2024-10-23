@@ -27,6 +27,8 @@ from transformers import (
     SchedulerType,
     get_scheduler,
 )
+from torch.nn import CrossEntropyLoss
+
 from peft import (
     TaskType, 
     get_peft_model,
@@ -196,6 +198,18 @@ def parse_args():
 
     return args
 
+def loss_fn(logits, labels):
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    # Flatten the tokens
+    loss_fct = CrossEntropyLoss(reduction="sum")
+    shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+    shift_labels = shift_labels.view(-1)
+    # Enable model parallelism
+    shift_labels = shift_labels.to(shift_logits.device)
+    loss = loss_fct(shift_logits, shift_labels)
+    return loss
+
 def main():
     args = parse_args()
 
@@ -339,6 +353,7 @@ def main():
     if args.already_trained_path is None:
         peft_config = MultitaskPromptTuningConfig(
             num_tasks=2,
+            num_ranks=64,
             num_virtual_tokens=args.num_virtual_tokens,
             inference_mode=False, 
             task_type=TaskType.CAUSAL_LM,
@@ -479,17 +494,6 @@ def main():
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
 
-    # unwrapped_model = accelerator.unwrap_model(model)
-    # # When doing multi-gpu training, we need to use accelerator.get_state_dict(model) to get the state_dict.
-    # # Otherwise, sometimes the model will be saved with only part of the parameters.
-    # # Also, accelerator needs to use the wrapped model to get the state_dict.
-    # state_dict = accelerator.get_state_dict(model)
-    # # When using lora, the unwrapped model is a PeftModel, which doesn't support the is_main_process 
-    # # and has its own save_pretrained function for only saving lora modules.
-    # # We have to mannually specify the is_main_process outside the save_pretrained function.
-    # if accelerator.is_main_process:
-    #     unwrapped_model.save_pretrained(args.output_dir, state_dict=state_dict, save_embedding_layers=True)
-
     # update the progress_bar if load from checkpoint
     progress_bar.update(starting_epoch * num_update_steps_per_epoch)
     completed_steps = starting_epoch * num_update_steps_per_epoch
@@ -507,9 +511,14 @@ def main():
                     continue
 
             with accelerator.accumulate(model):
+                labels = batch.pop("labels")
+                prefix_labels = torch.full((labels.size(0), args.num_virtual_tokens), -100).to(labels.device)
+                labels = torch.cat((prefix_labels, labels), dim=1)
+
                 outputs = model(**batch)
-                loss = outputs.loss
-                
+                logits = outputs[0]
+                loss = loss_fn(logits, labels)
+
                 # We keep track of the loss at each logged step
                 total_loss += loss.detach().float()
                 accelerator.backward(loss)
@@ -530,8 +539,13 @@ def main():
                         eval_loss = 0
                         for eval_step, eval_batch in enumerate(eval_dataloader):
                             with torch.no_grad():
+                                eval_labels = eval_batch.pop("labels")
+                                prefix_labels = torch.full((eval_labels.size(0), args.num_virtual_tokens), -100).to(eval_labels.device)
+                                eval_labels = torch.cat((prefix_labels, eval_labels), dim=1)
+
                                 eval_outputs = model(**eval_batch)
-                                eval_loss += eval_outputs.loss.detach().float()
+                                eval_logits = eval_outputs[0]
+                                eval_loss += loss_fn(eval_logits, eval_labels).detach().float()
                         
                         eval_loss /= (eval_step + 1)
                         total_eval_loss += eval_loss  # 累加每个 eval_dataloader 的 eval loss
@@ -577,6 +591,17 @@ def main():
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
+
+    unwrapped_model = accelerator.unwrap_model(model)
+    # # When doing multi-gpu training, we need to use accelerator.get_state_dict(model) to get the state_dict.
+    # # Otherwise, sometimes the model will be saved with only part of the parameters.
+    # # Also, accelerator needs to use the wrapped model to get the state_dict.
+    state_dict = accelerator.get_state_dict(model)
+    # # When using lora, the unwrapped model is a PeftModel, which doesn't support the is_main_process 
+    # # and has its own save_pretrained function for only saving lora modules.
+    # # We have to mannually specify the is_main_process outside the save_pretrained function.
+    if accelerator.is_main_process:
+        unwrapped_model.save_pretrained(f"{args.output_dir}current", state_dict=state_dict, save_embedding_layers=True)
 
     if args.with_tracking:
         accelerator.end_training()
