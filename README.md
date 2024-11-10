@@ -7,7 +7,7 @@ This includes the original implementation of [Retrieve-Plan-Generation: An Itera
 # Install environment with Conda
 Create a conda env and follow setup.sh to install dependencies.
 
-# Quick start
+# Quick Start
 ### Download Model
 1. Download our demo [models](https://drive.google.com/drive/folders/1HXh1LQmWL0XmHVInW4X4Tyg7hEeo0pvW?usp=drive_link)
 2. Download bge-reranker-base in https://huggingface.co/BAAI/bge-reranker-base, and Download en_core_web_sm by
