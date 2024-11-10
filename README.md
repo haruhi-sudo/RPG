@@ -8,7 +8,14 @@ This includes the original implementation of [Retrieve-Plan-Generation: An Itera
 Create a conda env and follow setup.sh to install dependencies.
 
 # Quick start
-### Download Model
+### 1. Train RPG
+```bash
+bash finetuning.sh # Modify the configuration as needed
+```
+
+### 2. Run RPG in the demo dataset
+
+#### Download our demo models
 1. Download our demo [models](https://drive.google.com/drive/folders/1HXh1LQmWL0XmHVInW4X4Tyg7hEeo0pvW?usp=drive_link)
 2. Download bge-reranker-base in https://huggingface.co/BAAI/bge-reranker-base, and Download en_core_web_sm by
 ```bash
@@ -16,7 +23,7 @@ python -m spacy download en_core_web_sm
 ```
 , put them into extractor/
 
-### Run RPG in the demo dataset
+#### Run RPG in the demo dataset
 ```
 python inference/long_form_demo.py \
   --model_path "output/demo" \
@@ -27,7 +34,7 @@ python inference/long_form_demo.py \
   --task "asqa"
 ```
 
-### Or run RPG with retriever
+#### Or run RPG with retriever
 Refer to [self-rag](https://github.com/AkariAsai/self-rag) to setup retriever(Retriever Setup Section). 
 
 
@@ -62,10 +69,7 @@ generation_with_retriever_demo("Tell me more about Hello Kitty", model, extracto
                                 retriever=retriever, use_retriever=True)
 ```
 
-### Train RPG
-```bash
-bash finetuning.sh # Modify the configuration as needed
-```
+
 
 # Citation
 ```
