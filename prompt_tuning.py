@@ -602,6 +602,7 @@ def main():
     # # We have to mannually specify the is_main_process outside the save_pretrained function.
     if accelerator.is_main_process:
         unwrapped_model.save_pretrained(f"{args.output_dir}current", state_dict=state_dict, save_embedding_layers=True)
+        tokenizer.save_pretrained(f"{args.output_dir}current")
 
     if args.with_tracking:
         accelerator.end_training()
