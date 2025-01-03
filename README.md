@@ -12,6 +12,7 @@ Create a conda env and follow setup.sh to install dependencies.
 ```bash
 bash finetuning.sh # Modify the configuration as needed
 ```
+[training datasets](https://drive.google.com/drive/folders/1HXh1LQmWL0XmHVInW4X4Tyg7hEeo0pvW?usp=drive_link)
 
 ### 2. Run RPG in the demo dataset
 
