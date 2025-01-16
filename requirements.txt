@@ -7,7 +7,7 @@ tqdm
 spacy
 scikit-learn
 jsonlines
-transformers==4.36.2
+transformers==4.38.0
 filelock
 datasets==2.15.0
 nltk
@@ -26,3 +26,4 @@ tokenizers==0.15.0
 tensorboard==2.14.0
 openai==0.28.1
 tiktoken==0.5.2
+FlagEmbedding==1.2.9
